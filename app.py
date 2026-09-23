@@ -53,6 +53,9 @@ def payment_qr():
 app.secret_key = "hostel_secret_key"
 app.config["SESSION_TYPE"] = "filesystem"
 HOSTEL_FEE = 114000.00
+DEFAULT_PROPERTY_SLUG = "rkh-main"
+DEFAULT_PROPERTY_NAME = "Radha Krishan Hostel"
+PROPERTY_MODULES = ("dashboard", "students", "rooms", "attendance", "complaints", "laundry", "mess", "payments", "reports")
 ADMIN_2FA_ENABLED = os.environ.get("ADMIN_2FA_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 STUDENT_EMAIL_VERIFICATION_ENABLED = os.environ.get("STUDENT_EMAIL_VERIFICATION_ENABLED", "0").lower() not in {"0", "false", "no", "off"}
 
@@ -79,10 +82,47 @@ def get_db_connection():
 
 def find_admin(cursor, value: str):
     cursor.execute(
-        "SELECT * FROM `admin` WHERE role IN ('admin', 'super_admin') AND (LOWER(email)=%s OR LOWER(`admin id`)=%s OR LOWER(`neme`)=%s)",
+        "SELECT * FROM `admin` WHERE role='property_owner' AND (LOWER(email)=%s OR LOWER(`admin id`)=%s OR LOWER(`neme`)=%s)",
         (value, value, value),
     )
     return cursor.fetchone()
+
+
+def get_property_id_for_user(cursor, admin_id):
+    """Return the single tenant/property an authenticated staff member belongs to."""
+    cursor.execute("SELECT property_id FROM `admin` WHERE id=%s", (admin_id,))
+    record = cursor.fetchone()
+    if isinstance(record, dict):
+        return record.get("property_id")
+    return record[0] if record else None
+
+
+def current_property_id(cursor=None):
+    property_id = session.get("property_id")
+    if property_id:
+        return property_id
+    if cursor and session.get("user_type") in {"admin", "warden", "laundry_admin", "mess_admin"}:
+        property_id = get_property_id_for_user(cursor, session.get("user_id"))
+        if property_id:
+            session["property_id"] = property_id
+    return property_id
+
+
+def can_use_module(cursor, module_name):
+    """Subscription entitlement guard; no billing or super-admin behaviour is implemented here."""
+    property_id = current_property_id(cursor)
+    if not property_id or module_name not in PROPERTY_MODULES:
+        return False
+    cursor.execute("SELECT enabled FROM property_module_permissions WHERE property_id=%s AND module_key=%s", (property_id, module_name))
+    permission = cursor.fetchone()
+    enabled = permission.get("enabled") if isinstance(permission, dict) and permission else (permission[0] if permission else 0)
+    return bool(enabled)
+
+
+def owned_student(cursor, student_id, property_id=None):
+    property_id = property_id or current_property_id(cursor)
+    cursor.execute("SELECT id FROM students WHERE id=%s AND property_id=%s", (student_id, property_id))
+    return cursor.fetchone() is not None
 
 
 def find_staff_role(cursor, value: str, role: str):
@@ -109,10 +149,23 @@ def initialize_database():
     try:
         connection = get_db_connection()
         cursor = connection.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS properties (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(150) NOT NULL,
+                slug VARCHAR(100) NOT NULL UNIQUE,
+                subscription_status VARCHAR(20) NOT NULL DEFAULT 'active',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("INSERT INTO properties (name, slug) VALUES (%s, %s) ON DUPLICATE KEY UPDATE name=VALUES(name)", (DEFAULT_PROPERTY_NAME, DEFAULT_PROPERTY_SLUG))
+        cursor.execute("SELECT id FROM properties WHERE slug=%s", (DEFAULT_PROPERTY_SLUG,))
+        default_property_id = cursor.fetchone()[0]
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS students (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                property_id INT NOT NULL,
                 name VARCHAR(100),
                 email VARCHAR(100),
                 phone VARCHAR(20),
@@ -282,12 +335,13 @@ def initialize_database():
             """
             CREATE TABLE IF NOT EXISTS `admin` (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                property_id INT NOT NULL,
                 `neme` VARCHAR(100),
                 `email` VARCHAR(100) UNIQUE,
                 `admin id` VARCHAR(100) UNIQUE,
                 `password` VARCHAR(255),
                 phone VARCHAR(20),
-                role VARCHAR(20) NOT NULL DEFAULT 'admin',
+                role VARCHAR(30) NOT NULL DEFAULT 'property_owner',
                 two_factor_secret VARCHAR(64),
                 two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0
             )
@@ -297,6 +351,7 @@ def initialize_database():
             """
             CREATE TABLE IF NOT EXISTS rooms (
                 id INT AUTO_INCREMENT PRIMARY KEY,
+                property_id INT NOT NULL,
                 hostel VARCHAR(100),
                 block VARCHAR(100),
                 room VARCHAR(20),
@@ -307,6 +362,14 @@ def initialize_database():
             )
             """
         )
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS property_module_permissions (
+                property_id INT NOT NULL,
+                module_key VARCHAR(50) NOT NULL,
+                enabled TINYINT(1) NOT NULL DEFAULT 1,
+                PRIMARY KEY (property_id, module_key)
+            )
+        """)
         homepage_rooms = [
             ("RKH", "Basement", f"B-{number:02d}") for number in range(1, 8)
         ] + [
@@ -442,6 +505,7 @@ def initialize_database():
             except Exception:
                 pass
         for column_sql in [
+            "ALTER TABLE students ADD COLUMN property_id INT NOT NULL DEFAULT 1",
             "ALTER TABLE students ADD COLUMN department VARCHAR(100)",
             "ALTER TABLE students ADD COLUMN year_semester VARCHAR(100)",
             "ALTER TABLE students ADD COLUMN bed_number VARCHAR(20)",
@@ -450,42 +514,60 @@ def initialize_database():
             "ALTER TABLE students ADD COLUMN valid_until VARCHAR(50)",
             "ALTER TABLE students ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 0",
             "ALTER TABLE `admin` ADD COLUMN phone VARCHAR(20)",
-            "ALTER TABLE `admin` ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'admin'",
+            "ALTER TABLE `admin` ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE `admin` ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT 'property_owner'",
             "ALTER TABLE `admin` ADD COLUMN two_factor_secret VARCHAR(64)",
             "ALTER TABLE `admin` ADD COLUMN two_factor_enabled TINYINT(1) NOT NULL DEFAULT 0",
             "ALTER TABLE laundry_tokens ADD COLUMN valid_until VARCHAR(50)",
                 "ALTER TABLE laundry_tokens ADD COLUMN verification_code CHAR(6)",
                 "ALTER TABLE laundry_tokens ADD COLUMN bag_in_at DATETIME NULL",
                 "ALTER TABLE laundry_tokens ADD COLUMN bag_out_at DATETIME NULL",
-                "ALTER TABLE laundry_tokens ADD COLUMN out_code CHAR(6)",
+            "ALTER TABLE laundry_tokens ADD COLUMN out_code CHAR(6)",
+            "ALTER TABLE rooms ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE complaints ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE laundry_tokens ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE attendance ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE attendance_locks ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE leave_requests ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE notifications ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE payment_submissions ADD COLUMN property_id INT NOT NULL DEFAULT 1",
+            "ALTER TABLE admin_access_logs ADD COLUMN property_id INT NOT NULL DEFAULT 1",
         ]:
             try:
                 cursor.execute(column_sql)
             except Exception:
                 pass
+        # Existing single-hostel records become the first property. New records are always scoped.
+        for table in ("students", "admin", "rooms", "complaints", "laundry_tokens", "attendance", "attendance_locks", "leave_requests", "notifications", "payment_submissions", "admin_access_logs"):
+            cursor.execute(f"UPDATE {table} SET property_id=%s WHERE property_id IS NULL OR property_id=0", (default_property_id,))
+        cursor.execute("UPDATE `admin` SET role='property_owner' WHERE role='admin' OR role IS NULL OR role='' ")
+        cursor.executemany(
+            "INSERT IGNORE INTO property_module_permissions (property_id, module_key, enabled) VALUES (%s, %s, 1)",
+            [(default_property_id, module) for module in PROPERTY_MODULES],
+        )
         cursor.execute(
             """
-            INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone)
-            VALUES ('Hostel admin', 'admin@gmail.com', 'admin@gmail.com', %s, NULL)
+            INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone, property_id, role)
+            VALUES ('Hostel admin', 'admin@gmail.com', 'admin@gmail.com', %s, NULL, %s, 'property_owner')
             ON DUPLICATE KEY UPDATE
                 `neme` = VALUES(`neme`),
                 `email` = VALUES(`email`),
                 `admin id` = VALUES(`admin id`),
-                `password` = VALUES(`password`)
+                `password` = VALUES(`password`), property_id=VALUES(property_id), role='property_owner'
             """,
-            (hash_password("admin123"),),
+            (hash_password("admin123"), default_property_id),
         )
         mukesh_admin_password = os.environ.get("MUKESH_ADMIN_PASSWORD", "RkHostel!Admin#2026")
         cursor.execute(
             """
-            INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone)
-            VALUES ('Mukesh Bagri', 'mukeshbagri538@gmail.com', 'mukeshbagri538@gmail.com', %s, '7357548523')
+            INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone, property_id, role)
+            VALUES ('Mukesh Bagri', 'mukeshbagri538@gmail.com', 'mukeshbagri538@gmail.com', %s, '7357548523', %s, 'property_owner')
             ON DUPLICATE KEY UPDATE
                 `neme` = VALUES(`neme`),
                 `password` = VALUES(`password`),
-                phone = VALUES(phone)
+                phone = VALUES(phone), property_id=VALUES(property_id), role='property_owner'
             """,
-            (hash_password(mukesh_admin_password),),
+            (hash_password(mukesh_admin_password), default_property_id),
         )
         for name, email, password, role in [
             ("Warden", "mukeshbagri598@gmail.com", "Mukeshbagri598@#", "warden"),
@@ -494,11 +576,11 @@ def initialize_database():
         ]:
             cursor.execute(
                 """
-                INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone, role, two_factor_enabled)
-                VALUES (%s, %s, %s, %s, NULL, %s, 0)
-                ON DUPLICATE KEY UPDATE `neme`=VALUES(`neme`), `password`=VALUES(`password`), role=VALUES(role), two_factor_enabled=0
+                INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone, property_id, role, two_factor_enabled)
+                VALUES (%s, %s, %s, %s, NULL, %s, %s, 0)
+                ON DUPLICATE KEY UPDATE `neme`=VALUES(`neme`), `password`=VALUES(`password`), property_id=VALUES(property_id), role=VALUES(role), two_factor_enabled=0
                 """,
-                (name, email, email, hash_password(password), role),
+                (name, email, email, hash_password(password), default_property_id, role),
             )
         cursor.execute("SELECT id, two_factor_secret FROM `admin`")
         for admin in cursor.fetchall():
@@ -597,11 +679,12 @@ def record_admin_access(admin, role):
         connection = get_db_connection()
         cursor = connection.cursor()
         cursor.execute(
-            "INSERT INTO admin_access_logs (admin_id, email, role, ip_address, user_agent, session_token, session_active) VALUES (%s, %s, %s, %s, %s, %s, 1)",
+            "INSERT INTO admin_access_logs (admin_id, email, role, property_id, ip_address, user_agent, session_token, session_active) VALUES (%s, %s, %s, %s, %s, %s, %s, 1)",
             (
                 admin["id"],
                 admin.get("email", ""),
                 role,
+                admin.get("property_id") or session.get("property_id"),
                 request.headers.get("X-Forwarded-For", request.remote_addr),
                 request.user_agent.string[:1000],
                 session_token,
@@ -1169,6 +1252,7 @@ def admin_login():
                 verify_password(password, stored_admin_password)
                 or stored_admin_password == password
             ):
+                session["property_id"] = admin.get("property_id")
                 role_redirects = {
                     "warden": ("warden", "/warden-dashboard"),
                     "laundry_admin": ("laundry_admin", "/laundry-admin-dashboard"),
@@ -1306,6 +1390,7 @@ def warden_login():
             if warden and (verify_password(password, stored_password) or stored_password == password):
                 session["user_type"] = "warden"
                 session["user_id"] = warden["id"]
+                session["property_id"] = warden.get("property_id")
                 record_admin_access(warden, "warden")
                 return redirect("/warden-dashboard")
         except Exception as exc:
@@ -1333,6 +1418,7 @@ def warden_dashboard():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True, buffered=True)
+        property_id = current_property_id(cursor)
         cursor.execute(
             """
             SELECT s.id, s.name, s.email, s.phone, s.hostel, s.block, s.room,
@@ -1341,17 +1427,17 @@ def warden_dashboard():
                    a.status AS attendance_status
             FROM students s
             LEFT JOIN attendance a ON a.student_id=s.id AND a.attendance_date=%s
-            WHERE s.status='approved'
+            WHERE s.property_id=%s AND s.status='approved'
             ORDER BY s.name
             """,
-            (attendance_date,),
+            (attendance_date, property_id),
         )
         students = cursor.fetchall()
         cursor.execute("SELECT attendance_date FROM attendance_locks WHERE attendance_date=%s", (attendance_date,))
         day_locked = cursor.fetchone() is not None
-        cursor.execute("SELECT COUNT(*) AS total FROM students WHERE status='approved'")
+        cursor.execute("SELECT COUNT(*) AS total FROM students WHERE property_id=%s AND status='approved'", (property_id,))
         total_students = cursor.fetchone()["total"]
-        cursor.execute("SELECT COUNT(*) AS total FROM attendance a JOIN students s ON s.id=a.student_id WHERE s.status='approved' AND a.attendance_date=%s", (attendance_date,))
+        cursor.execute("SELECT COUNT(*) AS total FROM attendance a JOIN students s ON s.id=a.student_id WHERE s.property_id=%s AND a.attendance_date=%s", (property_id, attendance_date))
         marked_students = cursor.fetchone()["total"]
         cursor.execute(
             """
@@ -1360,8 +1446,9 @@ def warden_dashboard():
                    l.created_at, s.id AS student_id, s.name, s.room, s.guardian_phone
             FROM leave_requests l
             JOIN students s ON s.id=l.student_id
+            WHERE l.property_id=%s AND s.property_id=%s
             ORDER BY l.created_at DESC
-            """
+            """, (property_id, property_id)
         )
         leave_requests = cursor.fetchall()
         cursor.close()
@@ -1476,13 +1563,14 @@ def mess_warden_dashboard():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True, buffered=True)
+        property_id = current_property_id(cursor)
         cursor.execute(
             """
                  SELECT id, name, photo_url
             FROM students
-            WHERE status='approved'
+            WHERE property_id=%s AND status='approved'
             ORDER BY name
-            """
+            """, (property_id,)
         )
         students = cursor.fetchall()
         cursor.close()
@@ -1507,6 +1595,7 @@ def laundry_admin_login():
             if staff and (verify_password(password, stored_password) or stored_password == password):
                 session["user_type"] = "laundry_admin"
                 session["user_id"] = staff["id"]
+                session["property_id"] = staff.get("property_id")
                 record_admin_access(staff, "laundry_admin")
                 return redirect("/laundry-admin-dashboard")
         except Exception as exc:
@@ -1523,6 +1612,7 @@ def laundry_admin_dashboard():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True, buffered=True)
+        property_id = current_property_id(cursor)
         cursor.execute(
             """
                  SELECT s.id AS student_id, s.name, s.email, s.phone, s.hostel, s.room,
@@ -1534,9 +1624,9 @@ def laundry_admin_dashboard():
                 SELECT latest.id FROM laundry_tokens latest
                 WHERE latest.student_id=s.id ORDER BY latest.id DESC LIMIT 1
             )
-            WHERE s.status='approved'
+            WHERE s.property_id=%s AND s.status='approved'
             ORDER BY s.name
-            """
+            """, (property_id,)
         )
         laundry_students = cursor.fetchall()
         cursor.close()
@@ -1737,12 +1827,15 @@ def register():
             except Exception:
                 pass
             email = request.form.get("email", "").strip().lower()
+            cursor.execute("SELECT id FROM properties WHERE slug=%s", (DEFAULT_PROPERTY_SLUG,))
+            property_row = cursor.fetchone()
+            property_id = property_row[0] if property_row else 1
             hostel = request.form.get("hostel", "").strip()
             floor = request.form.get("block", "").strip()
             room_number = request.form.get("room", "").strip()
             cursor.execute(
-                "SELECT capacity, status FROM rooms WHERE hostel=%s AND block=%s AND room=%s",
-                (hostel, floor, room_number),
+                "SELECT capacity, status FROM rooms WHERE property_id=%s AND hostel=%s AND block=%s AND room=%s",
+                (property_id, hostel, floor, room_number),
             )
             selected_room = cursor.fetchone()
             if not selected_room or selected_room[1] != "available":
@@ -1750,8 +1843,8 @@ def register():
                 connection.close()
                 return render_template("registration.html", error="Please select an available room.", rooms=get_registration_rooms()), 400
             cursor.execute(
-                "SELECT COUNT(*) FROM students WHERE hostel=%s AND block=%s AND room=%s AND status='approved'",
-                (hostel, floor, room_number),
+                "SELECT COUNT(*) FROM students WHERE property_id=%s AND hostel=%s AND block=%s AND room=%s AND status='approved'",
+                (property_id, hostel, floor, room_number),
             )
             if cursor.fetchone()[0] >= selected_room[0]:
                 cursor.close()
@@ -1760,11 +1853,11 @@ def register():
             otp = create_otp()
             cursor.execute(
                 """
-                INSERT INTO students (name, email, phone, hostel, block, room, password, rent_paid, rent_amount, rent_paid_amount, email_verified)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO students (property_id, name, email, phone, hostel, block, room, password, rent_paid, rent_amount, rent_paid_amount, email_verified)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    request.form.get("name", ""),
+                    property_id, request.form.get("name", ""),
                     email,
                     request.form.get("phone", ""),
                     hostel,
@@ -2368,6 +2461,11 @@ def download_fee_receipt():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True)
+        if room_id:
+            cursor.execute("SELECT id FROM rooms WHERE id=%s AND property_id=%s", (room_id, property_id))
+            if not cursor.fetchone():
+                flash("You cannot manage a room from another property.", "danger")
+                return redirect("/admin-dashboard")
         cursor.execute("SELECT * FROM students WHERE id=%s", (session.get("user_id"),))
         student = cursor.fetchone()
         cursor.close()
@@ -2538,52 +2636,55 @@ def admin_dashboard():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True, buffered=True)
-        cursor.execute("SELECT COUNT(*) AS count FROM students")
+        property_id = current_property_id(cursor)
+        if not property_id or not can_use_module(cursor, "dashboard"):
+            return "This property's dashboard subscription is inactive.", 403
+        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE property_id=%s", (property_id,))
         student_count = cursor.fetchone()["count"]
-        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE status='pending'")
+        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND status='pending'", (property_id,))
         pending_count = cursor.fetchone()["count"]
-        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE status='approved'")
+        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND status='approved'", (property_id,))
         approved_count = cursor.fetchone()["count"]
-        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE status='rejected'")
+        cursor.execute("SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND status='rejected'", (property_id,))
         rejected_count = cursor.fetchone()["count"]
         cursor.execute(
-            "SELECT COUNT(*) AS count FROM rooms"
+            "SELECT COUNT(*) AS count FROM rooms WHERE property_id=%s", (property_id,)
         )
         room_count = cursor.fetchone()["count"]
         cursor.execute(
-            "SELECT COUNT(DISTINCT CONCAT(hostel, '|', block, '|', room)) AS count FROM students"
+            "SELECT COUNT(DISTINCT CONCAT(hostel, '|', block, '|', room)) AS count FROM students WHERE property_id=%s", (property_id,)
         )
         total_rooms = cursor.fetchone()["count"]
         cursor.execute(
-            "SELECT COUNT(DISTINCT CONCAT(hostel, '|', block, '|', room)) AS count FROM students WHERE status='approved'"
+            "SELECT COUNT(DISTINCT CONCAT(hostel, '|', block, '|', room)) AS count FROM students WHERE property_id=%s AND status='approved'", (property_id,)
         )
         occupied_rooms = cursor.fetchone()["count"]
         available_rooms = max(total_rooms - occupied_rooms, 0)
         cursor.execute(
-            "SELECT COUNT(*) AS count FROM students WHERE status='approved' AND rent_paid='no'"
+            "SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND status='approved' AND rent_paid='no'", (property_id,)
         )
         pending_rent_payments = cursor.fetchone()["count"]
         cursor.execute(
-            "SELECT COALESCE(SUM(rent_amount), 0) AS total_expected, COALESCE(SUM(rent_paid_amount), 0) AS total_paid, COALESCE(SUM(GREATEST(rent_amount - rent_paid_amount, 0)), 0) AS total_pending FROM students"
+            "SELECT COALESCE(SUM(rent_amount), 0) AS total_expected, COALESCE(SUM(rent_paid_amount), 0) AS total_paid, COALESCE(SUM(GREATEST(rent_amount - rent_paid_amount, 0)), 0) AS total_pending FROM students WHERE property_id=%s", (property_id,)
         )
         rent_totals = cursor.fetchone()
         cursor.execute(
-            "SELECT COUNT(*) AS count FROM students WHERE rent_paid='yes'"
+            "SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND rent_paid='yes'", (property_id,)
         )
         fully_paid_students = cursor.fetchone()["count"]
         cursor.execute(
-            "SELECT COUNT(*) AS count FROM students WHERE rent_paid='no' AND rent_paid_amount > 0"
+            "SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND rent_paid='no' AND rent_paid_amount > 0", (property_id,)
         )
         partially_paid_students = cursor.fetchone()["count"]
         cursor.execute(
-            "SELECT COUNT(*) AS count FROM students WHERE rent_paid='no' AND rent_paid_amount = 0"
+            "SELECT COUNT(*) AS count FROM students WHERE property_id=%s AND rent_paid='no' AND rent_paid_amount = 0", (property_id,)
         )
         unpaid_students = cursor.fetchone()["count"]
         total_rent_paid = float(rent_totals["total_paid"] or 0)
         total_rent_pending = float(rent_totals["total_pending"] or 0)
         total_expected_fee = float(rent_totals["total_expected"] or 0)
         cursor.execute(
-            "SELECT MONTH(created_at) AS month, COUNT(*) AS count FROM students WHERE YEAR(created_at)=YEAR(CURDATE()) GROUP BY MONTH(created_at)"
+            "SELECT MONTH(created_at) AS month, COUNT(*) AS count FROM students WHERE property_id=%s AND YEAR(created_at)=YEAR(CURDATE()) GROUP BY MONTH(created_at)", (property_id,)
         )
         raw_monthly_requests = cursor.fetchall()
         month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -2592,34 +2693,34 @@ def admin_dashboard():
             for row in raw_monthly_requests
         ]
         cursor.execute(
-            "SELECT * FROM rooms ORDER BY hostel, block, room"
+            "SELECT * FROM rooms WHERE property_id=%s ORDER BY hostel, block, room", (property_id,)
         )
         rooms = cursor.fetchall()
         cursor.execute(
-            "SELECT l.*, s.name, s.email, s.room FROM leave_requests l JOIN students s ON s.id=l.student_id ORDER BY l.created_at DESC"
+            "SELECT l.*, s.name, s.email, s.room FROM leave_requests l JOIN students s ON s.id=l.student_id WHERE l.property_id=%s AND s.property_id=%s ORDER BY l.created_at DESC", (property_id, property_id)
         )
         leave_requests = cursor.fetchall()
-        cursor.execute("SELECT id, name, email, status, hostel, block, room FROM students WHERE status='approved' ORDER BY name")
+        cursor.execute("SELECT id, name, email, status, hostel, block, room FROM students WHERE property_id=%s AND status='approved' ORDER BY name", (property_id,))
         notification_students = cursor.fetchall()
         cursor.execute(
-            "SELECT hostel, block, room, COUNT(*) AS occupants FROM students WHERE status='approved' GROUP BY hostel, block, room ORDER BY occupants DESC"
+            "SELECT hostel, block, room, COUNT(*) AS occupants FROM students WHERE property_id=%s AND status='approved' GROUP BY hostel, block, room ORDER BY occupants DESC", (property_id,)
         )
         occupancy_by_room = cursor.fetchall()
         cursor.execute(
-            "SELECT c.id, c.student_id, c.category, c.subject, c.description, c.status, c.created_at, s.name, s.email FROM complaints c JOIN students s ON s.id = c.student_id ORDER BY c.created_at DESC"
+            "SELECT c.id, c.student_id, c.category, c.subject, c.description, c.status, c.created_at, s.name, s.email FROM complaints c JOIN students s ON s.id = c.student_id WHERE c.property_id=%s AND s.property_id=%s ORDER BY c.created_at DESC", (property_id, property_id)
         )
         complaints = cursor.fetchall()
         cursor.execute(
-            "SELECT l.id, l.student_id, l.token_no, l.verification_code, l.out_code, l.bag_in_at, l.bag_out_at, l.token_date, l.token_time, l.status, l.created_at, s.name, s.email FROM laundry_tokens l JOIN students s ON s.id = l.student_id ORDER BY l.created_at DESC"
+            "SELECT l.id, l.student_id, l.token_no, l.verification_code, l.out_code, l.bag_in_at, l.bag_out_at, l.token_date, l.token_time, l.status, l.created_at, s.name, s.email FROM laundry_tokens l JOIN students s ON s.id = l.student_id WHERE l.property_id=%s AND s.property_id=%s ORDER BY l.created_at DESC", (property_id, property_id)
         )
         laundry_requests = cursor.fetchall()
         cursor.execute(
-            "SELECT a.id, a.attendance_date, a.status, s.name, s.id AS student_id FROM attendance a JOIN students s ON s.id=a.student_id WHERE a.attendance_date=%s ORDER BY s.name",
-            (attendance_date,),
+            "SELECT a.id, a.attendance_date, a.status, s.name, s.id AS student_id FROM attendance a JOIN students s ON s.id=a.student_id WHERE a.property_id=%s AND s.property_id=%s AND a.attendance_date=%s ORDER BY s.name",
+            (property_id, property_id, attendance_date),
         )
         attendance_records = cursor.fetchall()
         cursor.execute(
-            "SELECT id, email, role, ip_address, user_agent, accessed_at, session_active FROM admin_access_logs ORDER BY accessed_at DESC LIMIT 100"
+            "SELECT id, email, role, ip_address, user_agent, accessed_at, session_active FROM admin_access_logs WHERE property_id=%s ORDER BY accessed_at DESC LIMIT 100", (property_id,)
         )
         access_logs = cursor.fetchall()
         for access_log in access_logs:
@@ -2629,8 +2730,9 @@ def admin_dashboard():
             SELECT p.*, s.name, s.email, s.phone, s.hostel, s.block, s.room
             FROM payment_submissions p
             JOIN students s ON s.id=p.student_id
+            WHERE p.property_id=%s AND s.property_id=%s
             ORDER BY p.created_at DESC
-            """
+            """, (property_id, property_id)
         )
         payment_submissions = cursor.fetchall()
         cursor.execute(
@@ -2639,16 +2741,16 @@ def admin_dashboard():
                    a.status AS attendance_status
             FROM students s
             LEFT JOIN attendance a ON a.student_id=s.id AND a.attendance_date=%s
-            WHERE s.status='approved'
+            WHERE s.property_id=%s AND s.status='approved'
             ORDER BY s.name
             """,
-            (attendance_date,),
+            (attendance_date, property_id),
         )
         admin_attendance_students = cursor.fetchall()
-        student_filter_sql = ""
-        params = []
+        student_filter_sql = "WHERE property_id=%s"
+        params = [property_id]
         if search_query:
-            student_filter_sql = "WHERE LOWER(CONCAT(IFNULL(name, ''), ' ', IFNULL(email, ''), ' ', IFNULL(phone, ''), ' ', IFNULL(hostel, ''), ' ', IFNULL(block, ''), ' ', IFNULL(room, ''))) LIKE %s"
+            student_filter_sql += " AND LOWER(CONCAT(IFNULL(name, ''), ' ', IFNULL(email, ''), ' ', IFNULL(phone, ''), ' ', IFNULL(hostel, ''), ' ', IFNULL(block, ''), ' ', IFNULL(room, ''))) LIKE %s"
             params.append(f"%{search_query}%")
         cursor.execute(
             f"SELECT * FROM students {student_filter_sql} ORDER BY created_at DESC",
@@ -2656,11 +2758,11 @@ def admin_dashboard():
         )
         students = cursor.fetchall()
         cursor.execute(
-            "SELECT id, name, email, phone, hostel, block, room, status FROM students WHERE status='pending' ORDER BY created_at DESC"
+            "SELECT id, name, email, phone, hostel, block, room, status FROM students WHERE property_id=%s AND status='pending' ORDER BY created_at DESC", (property_id,)
         )
         pending_students = cursor.fetchall()
         cursor.execute(
-            "SELECT id, name, email, phone, hostel, block, room, status, rent_paid, rent_amount, rent_paid_amount FROM students WHERE status='approved'"
+            "SELECT id, name, email, phone, hostel, block, room, status, rent_paid, rent_amount, rent_paid_amount FROM students WHERE property_id=%s AND status='approved'", (property_id,)
         )
         approved_students = cursor.fetchall()
         room_student_map = {}
@@ -2773,6 +2875,12 @@ def admin_action():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True)
+        property_id = current_property_id(cursor)
+        if not property_id or not can_use_module(cursor, "students"):
+            return "This property does not have access to student management.", 403
+        if student_id and not owned_student(cursor, student_id, property_id):
+            flash("You cannot manage a student from another property.", "danger")
+            return redirect("/admin-dashboard")
         if action in {"approve", "reject"}:
             status = "approved" if action == "approve" else "rejected"
             if action == "approve":
@@ -2783,10 +2891,10 @@ def admin_action():
                     FROM students s
                     LEFT JOIN rooms r ON r.hostel=s.hostel AND r.block=s.block AND r.room=s.room
                     LEFT JOIN students other ON other.hostel=s.hostel AND other.block=s.block AND other.room=s.room AND other.id <> s.id
-                    WHERE s.id=%s
+                    WHERE s.id=%s AND s.property_id=%s
                     GROUP BY s.id, s.hostel, s.block, s.room, r.capacity, r.status
                     """,
-                    (student_id,),
+                    (student_id, property_id),
                 )
                 room = cursor.fetchone()
                 if not room or room["status"] != "available" or room["occupants"] >= room["capacity"]:
@@ -2795,11 +2903,11 @@ def admin_action():
                     connection.close()
                     flash("This application cannot be approved because its selected room is unavailable or full.", "warning")
                     return redirect("/admin-dashboard")
-            cursor.execute("UPDATE students SET status=%s WHERE id=%s", (status, student_id))
+            cursor.execute("UPDATE students SET status=%s WHERE id=%s AND property_id=%s", (status, student_id, property_id))
         elif action == "mark_paid":
             cursor.execute(
-                "UPDATE students SET rent_paid=%s, rent_paid_amount = rent_amount WHERE id=%s",
-                ("yes", student_id),
+                "UPDATE students SET rent_paid=%s, rent_paid_amount = rent_amount WHERE id=%s AND property_id=%s",
+                ("yes", student_id, property_id),
             )
         elif action == "record_payment":
             amount_str = request.form.get("payment_amount", "0")
@@ -2808,8 +2916,8 @@ def admin_action():
             except ValueError:
                 payment_amount = 0.0
             cursor.execute(
-                "SELECT rent_amount, rent_paid_amount FROM students WHERE id=%s",
-                (student_id,),
+                "SELECT rent_amount, rent_paid_amount FROM students WHERE id=%s AND property_id=%s",
+                (student_id, property_id),
             )
             current = cursor.fetchone()
             if current:
@@ -2818,21 +2926,21 @@ def admin_action():
                 new_paid_total = min(rent_amount, rent_paid_amount + payment_amount)
                 rent_paid = "yes" if new_paid_total >= rent_amount and rent_amount > 0 else "no"
                 cursor.execute(
-                    "UPDATE students SET rent_paid_amount=%s, rent_paid=%s WHERE id=%s",
-                    (new_paid_total, rent_paid, student_id),
+                    "UPDATE students SET rent_paid_amount=%s, rent_paid=%s WHERE id=%s AND property_id=%s",
+                    (new_paid_total, rent_paid, student_id, property_id),
                 )
         elif action == "update_complaint":
             complaint_id = request.form.get("complaint_id")
             status = request.form.get("status", "pending")
             if complaint_id:
                 cursor.execute(
-                    "UPDATE complaints SET status=%s WHERE id=%s",
-                    (status, complaint_id),
+                    "UPDATE complaints SET status=%s WHERE id=%s AND property_id=%s",
+                    (status, complaint_id, property_id),
                 )
         elif action == "update_leave":
             leave_id = request.form.get("leave_id")
             status = request.form.get("status", "pending")
-            cursor.execute("UPDATE leave_requests SET status=%s, admin_note=%s WHERE id=%s", (status, request.form.get("admin_note", "").strip(), leave_id))
+            cursor.execute("UPDATE leave_requests SET status=%s, admin_note=%s WHERE id=%s AND property_id=%s", (status, request.form.get("admin_note", "").strip(), leave_id, property_id))
         elif action == "logout_device":
             authenticator_code = request.form.get("authenticator_code", "").strip()
             secret = session.get("admin_2fa_secret")
@@ -2849,19 +2957,19 @@ def admin_action():
             cursor.execute("UPDATE admin_access_logs SET session_active=0 WHERE id=%s", (request.form.get("access_log_id"),))
         elif action == "set_student_active":
             is_active = 1 if request.form.get("is_active") == "1" else 0
-            cursor.execute("UPDATE students SET is_active=%s WHERE id=%s", (is_active, student_id))
+            cursor.execute("UPDATE students SET is_active=%s WHERE id=%s AND property_id=%s", (is_active, student_id, property_id))
         elif action == "delete_student":
             for table in ("complaints", "laundry_tokens", "attendance", "leave_requests", "notifications"):
-                cursor.execute(f"DELETE FROM {table} WHERE student_id=%s", (student_id,))
-            cursor.execute("DELETE FROM students WHERE id=%s", (student_id,))
+                cursor.execute(f"DELETE FROM {table} WHERE student_id=%s AND property_id=%s", (student_id, property_id))
+            cursor.execute("DELETE FROM students WHERE id=%s AND property_id=%s", (student_id, property_id))
         elif action == "verify_payment":
             payment_status = request.form.get("status", "pending")
             if payment_status not in {"approved", "rejected"}:
                 return redirect("/admin-dashboard#payment-verification")
-            cursor.execute("SELECT student_id, amount, status FROM payment_submissions WHERE id=%s", (payment_id,))
+            cursor.execute("SELECT student_id, amount, status FROM payment_submissions WHERE id=%s AND property_id=%s", (payment_id, property_id))
             payment = cursor.fetchone()
             if payment and payment["status"] == "pending":
-                cursor.execute("UPDATE payment_submissions SET status=%s, admin_note=%s WHERE id=%s", (payment_status, request.form.get("admin_note", "").strip(), payment_id))
+                cursor.execute("UPDATE payment_submissions SET status=%s, admin_note=%s WHERE id=%s AND property_id=%s", (payment_status, request.form.get("admin_note", "").strip(), payment_id, property_id))
                 if payment_status == "approved":
                     cursor.execute("SELECT rent_amount, rent_paid_amount FROM students WHERE id=%s", (payment["student_id"],))
                     student_fee = cursor.fetchone()
@@ -2892,7 +3000,7 @@ def admin_action():
                 """
                 UPDATE rooms
                 SET hostel=%s, block=%s, room=%s, capacity=%s, status=%s, maintenance_notes=%s
-                WHERE id=%s
+                WHERE id=%s AND property_id=%s
                 """,
                 (
                     hostel,
@@ -2902,6 +3010,7 @@ def admin_action():
                     status,
                     request.form.get("maintenance_notes", "").strip(),
                     room_id,
+                    property_id,
                 ),
             )
         elif action == "add_room":
@@ -2924,8 +3033,9 @@ def admin_action():
             if status not in {"available", "maintenance", "unavailable"}:
                 status = "available"
             cursor.execute(
-                "INSERT INTO rooms (hostel, block, room, capacity, status, maintenance_notes) VALUES (%s, %s, %s, %s, %s, %s)",
+                "INSERT INTO rooms (property_id, hostel, block, room, capacity, status, maintenance_notes) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (
+                    property_id,
                     hostel,
                     floor,
                     room_number,
@@ -2936,11 +3046,11 @@ def admin_action():
             )
         elif action == "delete_room":
             cursor.execute(
-                "SELECT COUNT(*) AS occupants FROM students WHERE hostel=(SELECT hostel FROM rooms WHERE id=%s) AND block=(SELECT block FROM rooms WHERE id=%s) AND room=(SELECT room FROM rooms WHERE id=%s) AND status='approved'",
-                (room_id, room_id, room_id),
+            "SELECT COUNT(*) AS occupants FROM students WHERE property_id=%s AND hostel=(SELECT hostel FROM rooms WHERE id=%s AND property_id=%s) AND block=(SELECT block FROM rooms WHERE id=%s AND property_id=%s) AND room=(SELECT room FROM rooms WHERE id=%s AND property_id=%s) AND status='approved'",
+                (property_id, room_id, property_id, room_id, property_id, room_id, property_id),
             )
             if cursor.fetchone()["occupants"] == 0:
-                cursor.execute("DELETE FROM rooms WHERE id=%s", (room_id,))
+                cursor.execute("DELETE FROM rooms WHERE id=%s AND property_id=%s", (room_id, property_id))
         connection.commit()
         cursor.close()
         connection.close()
@@ -2973,10 +3083,14 @@ def admin_notification():
             image.save(os.path.join(upload_dir, filename))
             image_url = f"/uploads/{filename}"
         connection = get_db_connection()
-        cursor = connection.cursor()
+        cursor = connection.cursor(dictionary=True)
+        property_id = current_property_id(cursor)
+        if student_id and not owned_student(cursor, student_id, property_id):
+            flash("You cannot notify a student from another property.", "danger")
+            return redirect("/admin-dashboard")
         cursor.execute(
-            "INSERT INTO notifications (student_id, title, message, image_url) VALUES (%s, %s, %s, %s)",
-            (student_id, title, message, image_url),
+            "INSERT INTO notifications (property_id, student_id, title, message, image_url) VALUES (%s, %s, %s, %s, %s)",
+            (property_id, student_id, title, message, image_url),
         )
         connection.commit()
         cursor.close()
@@ -2995,7 +3109,8 @@ def admin_download_students():
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True, buffered=True)
-        cursor.execute("SELECT * FROM students ORDER BY created_at DESC")
+        property_id = current_property_id(cursor)
+        cursor.execute("SELECT * FROM students WHERE property_id=%s ORDER BY created_at DESC", (property_id,))
         students = cursor.fetchall()
         cursor.close()
         connection.close()
@@ -3026,20 +3141,21 @@ def admin_download_all_data():
     if session.get("user_type") != "admin":
         return redirect("/admin-login")
     datasets = {
-        "students.csv": "SELECT * FROM students ORDER BY created_at DESC",
-        "rooms.csv": "SELECT * FROM rooms ORDER BY hostel, block, room",
-        "complaints.csv": "SELECT c.*, s.name AS student_name, s.email FROM complaints c LEFT JOIN students s ON s.id=c.student_id ORDER BY c.created_at DESC",
-        "laundry_requests.csv": "SELECT l.*, s.name AS student_name, s.email FROM laundry_tokens l LEFT JOIN students s ON s.id=l.student_id ORDER BY l.created_at DESC",
-        "leave_requests.csv": "SELECT l.*, s.name AS student_name, s.email FROM leave_requests l LEFT JOIN students s ON s.id=l.student_id ORDER BY l.created_at DESC",
-        "notifications.csv": "SELECT n.*, s.name AS student_name, s.email FROM notifications n LEFT JOIN students s ON s.id=n.student_id ORDER BY n.created_at DESC",
+        "students.csv": "SELECT * FROM students WHERE property_id=%s ORDER BY created_at DESC",
+        "rooms.csv": "SELECT * FROM rooms WHERE property_id=%s ORDER BY hostel, block, room",
+        "complaints.csv": "SELECT c.*, s.name AS student_name, s.email FROM complaints c LEFT JOIN students s ON s.id=c.student_id WHERE c.property_id=%s ORDER BY c.created_at DESC",
+        "laundry_requests.csv": "SELECT l.*, s.name AS student_name, s.email FROM laundry_tokens l LEFT JOIN students s ON s.id=l.student_id WHERE l.property_id=%s ORDER BY l.created_at DESC",
+        "leave_requests.csv": "SELECT l.*, s.name AS student_name, s.email FROM leave_requests l LEFT JOIN students s ON s.id=l.student_id WHERE l.property_id=%s ORDER BY l.created_at DESC",
+        "notifications.csv": "SELECT n.*, s.name AS student_name, s.email FROM notifications n LEFT JOIN students s ON s.id=n.student_id WHERE n.property_id=%s ORDER BY n.created_at DESC",
     }
     try:
         connection = get_db_connection()
         cursor = connection.cursor(dictionary=True, buffered=True)
+        property_id = current_property_id(cursor)
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as workbook:
             for filename, query in datasets.items():
-                cursor.execute(query)
+                cursor.execute(query, (property_id,))
                 rows = cursor.fetchall()
                 output = io.StringIO()
                 if rows:
