@@ -3,6 +3,8 @@ import { fileURLToPath } from 'url';
 
 const trackerRoutes = [
   '/api/rooms',
+  '/payment-qr',
+  '/uploads/:path*',
   '/login',
   '/student-login',
   '/admin-login',
@@ -27,6 +29,11 @@ const trackerRoutes = [
   '/logout',
   '/admin-dashboard',
   '/admin-action',
+  '/admin-notification',
+  '/warden-login',
+  '/warden-dashboard',
+  '/warden-attendance',
+  '/warden-lock-attendance',
   '/admin-attendance-action',
   '/admin-attendance-save',
   '/mess-warden-login',

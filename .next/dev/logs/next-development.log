@@ -1,20 +1,14 @@
-{"timestamp":"00:00:25.542","source":"Server","level":"LOG","message":""}
-{"timestamp":"00:00:50.529","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"00:00:50.652","source":"Server","level":"ERROR","message":"Failed to proxy http://127.0.0.1:5000/api/rooms Error: connect ECONNREFUSED 127.0.0.1:5000"}
-{"timestamp":"00:00:50.658","source":"Server","level":"ERROR","message":"Error: connect ECONNREFUSED 127.0.0.1:5000"}
-{"timestamp":"00:00:50.725","source":"Server","level":"ERROR","message":"Failed to proxy http://127.0.0.1:5000/api/rooms Error: connect ECONNREFUSED 127.0.0.1:5000"}
-{"timestamp":"00:00:50.851","source":"Server","level":"ERROR","message":"Error: connect ECONNREFUSED 127.0.0.1:5000"}
-{"timestamp":"00:00:54.026","source":"Server","level":"ERROR","message":"Failed to proxy http://127.0.0.1:5000/student-login Error: connect ECONNREFUSED 127.0.0.1:5000"}
-{"timestamp":"00:00:54.030","source":"Server","level":"ERROR","message":"Error: connect ECONNREFUSED 127.0.0.1:5000"}
-{"timestamp":"00:07:55.789","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"00:22:32.421","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:26:22.798","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:27:52.794","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:27:54.977","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:28:57.558","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:29:41.272","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:33:27.802","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:36:56.650","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:37:16.887","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:38:57.688","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
-{"timestamp":"01:56:03.300","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:00:02.322","source":"Server","level":"LOG","message":""}
+{"timestamp":"00:01:18.997","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:01:23.889","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:02:44.376","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:02:58.659","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:03:42.495","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:04:33.674","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:08:11.545","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:09:50.024","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:12:16.414","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:14:15.412","source":"Server","level":"WARN","message":"Error: Failed to find Server Action. This request might be from an older or newer deployment.\nRead more: https://nextjs.org/docs/messages/failed-to-find-server-action"}
+{"timestamp":"00:14:45.493","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:17:27.410","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}
+{"timestamp":"00:21:13.989","source":"Browser","level":"INFO","message":"Download the React DevTools for a better development experience: https://react.dev/link/react-devtools"}

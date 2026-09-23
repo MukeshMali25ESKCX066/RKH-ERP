@@ -29,10 +29,10 @@ def uploaded_file(filename):
     requested_path = upload_dir / filename
     if requested_path.is_file():
         return send_from_directory(upload_dir, filename)
-    match = re.match(r"student_(\d+)_", Path(filename).name)
+    match = re.match(r"(student|college_id|payment)_(\d+)_", Path(filename).name)
     if match:
-        student_prefix = f"student_{match.group(1)}_"
-        fallback = next((path for path in upload_dir.glob(f"{student_prefix}*") if path.is_file()), None)
+        file_prefix = f"{match.group(1)}_{match.group(2)}_"
+        fallback = next((path for path in upload_dir.glob(f"{file_prefix}*") if path.is_file()), None)
         if fallback:
             return send_from_directory(upload_dir, fallback.name)
     return "File not found", 404
@@ -41,9 +41,14 @@ def uploaded_file(filename):
 @app.route("/payment-qr")
 def payment_qr():
     payment_path = BASE_DIR / "payment.jpeg"
-    if not payment_path.is_file():
-        return "Payment QR code is not configured", 404
-    return send_file(payment_path, mimetype="image/jpeg")
+    if payment_path.is_file():
+        return send_file(payment_path, mimetype="image/jpeg")
+
+    upload_dir = BASE_DIR / "uploads"
+    fallback = next((path for path in upload_dir.glob("payment_*.*") if path.is_file()), None)
+    if fallback:
+        return send_file(fallback)
+    return "Payment QR code is not configured", 404
 
 app.secret_key = "hostel_secret_key"
 app.config["SESSION_TYPE"] = "filesystem"

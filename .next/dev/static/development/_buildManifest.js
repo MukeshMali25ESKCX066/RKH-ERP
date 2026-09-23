@@ -1,11 +1,14 @@
 self.__BUILD_MANIFEST = {
-  "/_error": [
-    "static/chunks/pages/_error.js"
-  ],
   "__rewrites": {
     "afterFiles": [
       {
         "source": "/api/rooms"
+      },
+      {
+        "source": "/payment-qr"
+      },
+      {
+        "source": "/uploads/:path*"
       },
       {
         "source": "/login"
@@ -78,6 +81,21 @@ self.__BUILD_MANIFEST = {
       },
       {
         "source": "/admin-action"
+      },
+      {
+        "source": "/admin-notification"
+      },
+      {
+        "source": "/warden-login"
+      },
+      {
+        "source": "/warden-dashboard"
+      },
+      {
+        "source": "/warden-attendance"
+      },
+      {
+        "source": "/warden-lock-attendance"
       },
       {
         "source": "/admin-attendance-action"
