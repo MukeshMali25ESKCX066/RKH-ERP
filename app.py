@@ -56,6 +56,11 @@ HOSTEL_FEE = 114000.00
 DEFAULT_PROPERTY_SLUG = "rkh-main"
 DEFAULT_PROPERTY_NAME = "Radha Krishan Hostel"
 PROPERTY_MODULES = ("dashboard", "students", "rooms", "attendance", "complaints", "laundry", "mess", "payments", "reports")
+SUBSCRIPTION_PLANS = {
+    "starter": {"label": "Starter", "modules": ("dashboard", "students", "rooms")},
+    "growth": {"label": "Growth", "modules": ("dashboard", "students", "rooms", "attendance", "complaints", "laundry", "payments")},
+    "enterprise": {"label": "Enterprise", "modules": PROPERTY_MODULES},
+}
 ADMIN_2FA_ENABLED = os.environ.get("ADMIN_2FA_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
 STUDENT_EMAIL_VERIFICATION_ENABLED = os.environ.get("STUDENT_EMAIL_VERIFICATION_ENABLED", "0").lower() not in {"0", "false", "no", "off"}
 
@@ -109,14 +114,36 @@ def current_property_id(cursor=None):
 
 
 def can_use_module(cursor, module_name):
-    """Subscription entitlement guard; no billing or super-admin behaviour is implemented here."""
+    """Return whether the current approved property may use a module."""
     property_id = current_property_id(cursor)
     if not property_id or module_name not in PROPERTY_MODULES:
+        return False
+    cursor.execute("SELECT subscription_status FROM properties WHERE id=%s", (property_id,))
+    property_record = cursor.fetchone()
+    property_status = property_record.get("subscription_status") if isinstance(property_record, dict) else (property_record[0] if property_record else None)
+    if property_status != "active":
         return False
     cursor.execute("SELECT enabled FROM property_module_permissions WHERE property_id=%s AND module_key=%s", (property_id, module_name))
     permission = cursor.fetchone()
     enabled = permission.get("enabled") if isinstance(permission, dict) and permission else (permission[0] if permission else 0)
     return bool(enabled)
+
+
+def property_is_approved(cursor, property_id):
+    cursor.execute("SELECT subscription_status FROM properties WHERE id=%s", (property_id,))
+    record = cursor.fetchone()
+    status = record.get("subscription_status") if isinstance(record, dict) else (record[0] if record else None)
+    return status == "active"
+
+
+def apply_subscription_plan(cursor, property_id, plan_key):
+    """Persist server-side module entitlements for a plan; billing is intentionally out of scope."""
+    plan = SUBSCRIPTION_PLANS.get(plan_key, SUBSCRIPTION_PLANS["starter"])
+    cursor.execute("UPDATE properties SET plan_key=%s WHERE id=%s", (plan_key, property_id))
+    cursor.executemany(
+        "INSERT INTO property_module_permissions (property_id, module_key, enabled) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)",
+        [(property_id, module, int(module in plan["modules"])) for module in PROPERTY_MODULES],
+    )
 
 
 def owned_student(cursor, student_id, property_id=None):
@@ -155,9 +182,23 @@ def initialize_database():
                 name VARCHAR(150) NOT NULL,
                 slug VARCHAR(100) NOT NULL UNIQUE,
                 subscription_status VARCHAR(20) NOT NULL DEFAULT 'active',
+                plan_key VARCHAR(30) NOT NULL DEFAULT 'enterprise',
+                approval_note VARCHAR(255),
+                approved_by INT NULL,
+                approved_at DATETIME NULL,
                 created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        for column_sql in (
+            "ALTER TABLE properties ADD COLUMN plan_key VARCHAR(30) NOT NULL DEFAULT 'enterprise'",
+            "ALTER TABLE properties ADD COLUMN approval_note VARCHAR(255)",
+            "ALTER TABLE properties ADD COLUMN approved_by INT NULL",
+            "ALTER TABLE properties ADD COLUMN approved_at DATETIME NULL",
+        ):
+            try:
+                cursor.execute(column_sql)
+            except Exception:
+                pass
         cursor.execute("INSERT INTO properties (name, slug) VALUES (%s, %s) ON DUPLICATE KEY UPDATE name=VALUES(name)", (DEFAULT_PROPERTY_NAME, DEFAULT_PROPERTY_SLUG))
         cursor.execute("SELECT id FROM properties WHERE slug=%s", (DEFAULT_PROPERTY_SLUG,))
         default_property_id = cursor.fetchone()[0]
@@ -369,7 +410,11 @@ def initialize_database():
                 enabled TINYINT(1) NOT NULL DEFAULT 1,
                 PRIMARY KEY (property_id, module_key)
             )
-        """)
+            """)
+        try:
+            cursor.execute("ALTER TABLE `admin` ADD COLUMN approval_status VARCHAR(20) NOT NULL DEFAULT 'approved'")
+        except Exception:
+            pass
         homepage_rooms = [
             ("RKH", "Basement", f"B-{number:02d}") for number in range(1, 8)
         ] + [
@@ -545,6 +590,7 @@ def initialize_database():
             "INSERT IGNORE INTO property_module_permissions (property_id, module_key, enabled) VALUES (%s, %s, 1)",
             [(default_property_id, module) for module in PROPERTY_MODULES],
         )
+        cursor.execute("UPDATE properties SET plan_key='enterprise' WHERE id=%s AND (plan_key IS NULL OR plan_key='')", (default_property_id,))
         cursor.execute(
             """
             INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone, property_id, role)
@@ -582,6 +628,16 @@ def initialize_database():
                 """,
                 (name, email, email, hash_password(password), default_property_id, role),
             )
+        super_admin_email = os.environ.get("SUPER_ADMIN_EMAIL", "superadmin@rkh.local").strip().lower()
+        super_admin_password = os.environ.get("SUPER_ADMIN_PASSWORD", "ChangeMe!SuperAdmin2026")
+        cursor.execute(
+            """
+            INSERT INTO `admin` (`neme`, `email`, `admin id`, `password`, phone, property_id, role, approval_status, two_factor_enabled)
+            VALUES ('RKH Super Admin', %s, %s, %s, NULL, %s, 'super_admin', 'approved', 0)
+            ON DUPLICATE KEY UPDATE `neme`=VALUES(`neme`), `password`=VALUES(`password`), role='super_admin', approval_status='approved', two_factor_enabled=0
+            """,
+            (super_admin_email, super_admin_email, hash_password(super_admin_password), default_property_id),
+        )
         cursor.execute("SELECT id, two_factor_secret FROM `admin`")
         for admin in cursor.fetchall():
             if not admin[1]:
@@ -1137,10 +1193,11 @@ def public_rooms():
             SELECT r.id, r.hostel, r.block, r.room, r.capacity, r.status, r.maintenance_notes,
                    COUNT(CASE WHEN s.status='approved' THEN 1 END) AS occupants
             FROM rooms r
-            LEFT JOIN students s ON s.hostel=r.hostel AND s.block=r.block AND s.room=r.room
+            LEFT JOIN students s ON s.property_id=r.property_id AND s.hostel=r.hostel AND s.block=r.block AND s.room=r.room
+            JOIN properties p ON p.id=r.property_id AND p.slug=%s AND p.subscription_status='active'
             GROUP BY r.id, r.hostel, r.block, r.room, r.capacity, r.status, r.maintenance_notes
             ORDER BY r.hostel, r.block, r.room
-            """
+            """, (DEFAULT_PROPERTY_SLUG,)
         )
         rooms = cursor.fetchall()
         cursor.close()
@@ -1165,8 +1222,18 @@ def login():
             if admin:
                 stored_admin_password = admin.get("password", "")
                 if verify_password(password, stored_admin_password) or stored_admin_password == password:
+                    if admin.get("role") == "super_admin":
+                        cursor.close(); connection.close()
+                        return redirect("/super-admin-login")
+                    if admin.get("role") == "property_owner":
+                        cursor.execute("SELECT subscription_status FROM properties WHERE id=%s", (admin.get("property_id"),))
+                        property_record = cursor.fetchone()
+                        if admin.get("approval_status") != "approved" or not property_record or property_record.get("subscription_status") != "active":
+                            cursor.close(); connection.close()
+                            return render_template("login.html", error="Your property registration is pending Super Admin approval."), 403
                     session["user_type"] = "admin"
                     session["user_id"] = admin["id"]
+                    session["property_id"] = admin.get("property_id")
                     cursor.close()
                     connection.close()
                     return redirect("/admin-dashboard")
@@ -1244,6 +1311,10 @@ def admin_login():
             connection = get_db_connection()
             cursor = connection.cursor(dictionary=True, buffered=True)
             admin = find_any_staff(cursor, email)
+            if admin and admin.get("role") == "property_owner":
+                cursor.execute("SELECT subscription_status FROM properties WHERE id=%s", (admin.get("property_id"),))
+                property_record = cursor.fetchone()
+                admin["property_status"] = property_record.get("subscription_status") if property_record else None
             cursor.close()
             connection.close()
 
@@ -1252,6 +1323,10 @@ def admin_login():
                 verify_password(password, stored_admin_password)
                 or stored_admin_password == password
             ):
+                if admin.get("role") == "super_admin":
+                    return render_template("admin_login.html", error="Use the Super Admin login for this account."), 403
+                if admin.get("role") == "property_owner" and (admin.get("approval_status") != "approved" or admin.get("property_status") != "active"):
+                    return render_template("admin_login.html", error="Your property registration is pending Super Admin approval."), 403
                 session["property_id"] = admin.get("property_id")
                 role_redirects = {
                     "warden": ("warden", "/warden-dashboard"),
@@ -1289,6 +1364,116 @@ def admin_login():
         return render_template("admin_login.html", error="Invalid admin email or password"), 401
 
     return render_template("admin_login.html")
+
+
+@app.route("/property-owner/register", methods=["GET", "POST"])
+def property_owner_register():
+    if request.method == "POST":
+        owner_name = request.form.get("owner_name", "").strip()
+        property_name = request.form.get("property_name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        phone = request.form.get("phone", "").strip()
+        password = request.form.get("password", "")
+        requested_plan = request.form.get("plan_key", "starter")
+        if not owner_name or not property_name or not email or len(password) < 8 or requested_plan not in SUBSCRIPTION_PLANS:
+            return render_template("property_owner_register.html", error="Enter all required details and a password with at least 8 characters."), 400
+        slug_base = re.sub(r"[^a-z0-9]+", "-", property_name.lower()).strip("-")[:80] or "property"
+        try:
+            connection = get_db_connection()
+            cursor = connection.cursor(dictionary=True, buffered=True)
+            cursor.execute("SELECT id FROM `admin` WHERE LOWER(email)=%s", (email,))
+            if cursor.fetchone():
+                cursor.close(); connection.close()
+                return render_template("property_owner_register.html", error="An account already uses this email address."), 409
+            slug = slug_base
+            suffix = 2
+            while True:
+                cursor.execute("SELECT id FROM properties WHERE slug=%s", (slug,))
+                if not cursor.fetchone():
+                    break
+                slug = f"{slug_base}-{suffix}"
+                suffix += 1
+            cursor.execute("INSERT INTO properties (name, slug, subscription_status, plan_key) VALUES (%s, %s, 'pending', %s)", (property_name, slug, requested_plan))
+            property_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO `admin` (`neme`, email, `admin id`, password, phone, property_id, role, approval_status, two_factor_enabled) VALUES (%s, %s, %s, %s, %s, %s, 'property_owner', 'pending', 0)",
+                (owner_name, email, email, hash_password(password), phone, property_id),
+            )
+            apply_subscription_plan(cursor, property_id, requested_plan)
+            connection.commit(); cursor.close(); connection.close()
+            return redirect("/property-owner/pending")
+        except Exception as exc:
+            print("Property owner registration failed:", exc)
+            return render_template("property_owner_register.html", error="Registration could not be completed. Please try again."), 500
+    return render_template("property_owner_register.html", plans=SUBSCRIPTION_PLANS)
+
+
+@app.route("/property-owner/pending")
+def property_owner_pending():
+    return render_template("property_owner_pending.html")
+
+
+@app.route("/super-admin-login", methods=["GET", "POST"])
+def super_admin_login():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        try:
+            connection = get_db_connection(); cursor = connection.cursor(dictionary=True, buffered=True)
+            cursor.execute("SELECT * FROM `admin` WHERE role='super_admin' AND LOWER(email)=%s", (email,))
+            admin = cursor.fetchone(); cursor.close(); connection.close()
+            if admin and (verify_password(password, admin.get("password", "")) or password == admin.get("password")):
+                session.clear(); session["user_type"] = "super_admin"; session["user_id"] = admin["id"]
+                record_admin_access(admin, "super_admin")
+                return redirect("/super-admin-dashboard")
+        except Exception as exc:
+            print("Super admin login failed:", exc)
+        return render_template("super_admin_login.html", error="Invalid Super Admin email or password."), 401
+    return render_template("super_admin_login.html")
+
+
+@app.route("/super-admin-dashboard")
+def super_admin_dashboard():
+    if session.get("user_type") != "super_admin":
+        return redirect("/super-admin-login")
+    try:
+        connection = get_db_connection(); cursor = connection.cursor(dictionary=True, buffered=True)
+        cursor.execute("""SELECT p.*, a.`neme` AS owner_name, a.email AS owner_email, a.phone AS owner_phone
+                          FROM properties p LEFT JOIN `admin` a ON a.property_id=p.id AND a.role='property_owner'
+                          ORDER BY FIELD(p.subscription_status, 'pending', 'rejected', 'active'), p.created_at DESC""")
+        properties = cursor.fetchall(); cursor.close(); connection.close()
+    except Exception as exc:
+        print("Super admin dashboard failed:", exc); properties = []
+    return render_template("super_admin_dashboard.html", properties=properties, plans=SUBSCRIPTION_PLANS)
+
+
+@app.route("/super-admin/action", methods=["POST"])
+def super_admin_action():
+    if session.get("user_type") != "super_admin":
+        return redirect("/super-admin-login")
+    action = request.form.get("action")
+    property_id = request.form.get("property_id", type=int)
+    plan_key = request.form.get("plan_key", "starter")
+    note = request.form.get("approval_note", "").strip()[:255]
+    if not property_id or action not in {"approve", "reject", "update_plan", "suspend"} or plan_key not in SUBSCRIPTION_PLANS:
+        return redirect("/super-admin-dashboard")
+    try:
+        connection = get_db_connection(); cursor = connection.cursor(dictionary=True, buffered=True)
+        if action == "approve":
+            cursor.execute("UPDATE properties SET subscription_status='active', approval_note=%s, approved_by=%s, approved_at=NOW() WHERE id=%s", (note or None, session["user_id"], property_id))
+            cursor.execute("UPDATE `admin` SET approval_status='approved' WHERE property_id=%s AND role='property_owner'", (property_id,))
+            apply_subscription_plan(cursor, property_id, plan_key)
+        elif action == "reject":
+            cursor.execute("UPDATE properties SET subscription_status='rejected', approval_note=%s, approved_by=%s, approved_at=NOW() WHERE id=%s", (note or "Registration rejected", session["user_id"], property_id))
+            cursor.execute("UPDATE `admin` SET approval_status='rejected' WHERE property_id=%s AND role='property_owner'", (property_id,))
+        elif action == "suspend":
+            cursor.execute("UPDATE properties SET subscription_status='suspended', approval_note=%s WHERE id=%s", (note or "Access suspended", property_id))
+        else:
+            apply_subscription_plan(cursor, property_id, plan_key)
+        connection.commit(); cursor.close(); connection.close()
+    except Exception as exc:
+        print("Super admin action failed:", exc)
+    return redirect("/super-admin-dashboard")
 
 
 @app.route("/admin-2fa", methods=["GET", "POST"])
